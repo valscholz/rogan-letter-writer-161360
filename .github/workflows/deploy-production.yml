@@ -1,0 +1,94 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # Allow manual trigger
+
+env:
+  PROJECT_ID: caminu-127c0352
+  REGION: us-central1
+  SERVICE_NAME: rogan-letter-writer-161360-prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production  # Requires approval
+    
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev
+
+      - name: Create Artifact Registry repository
+        run: |
+          gcloud artifacts repositories create caminu-agents \
+            --repository-format=docker \
+            --location=us-central1 \
+            --description="Caminu AI agents container registry" || true
+
+      - name: Build Docker image
+        run: |
+          docker build -t us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:${{ github.sha }} .
+          docker build -t us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:latest .
+          docker build -t us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:stable .
+
+      - name: Push Docker image
+        run: |
+          docker push us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:${{ github.sha }}
+          docker push us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:latest
+          docker push us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:stable
+
+      - name: Deploy to Cloud Run (Production)
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --memory 1Gi \
+            --cpu 2 \
+            --min-instances 1 \
+            --max-instances 100 \
+            --set-env-vars ENVIRONMENT=production \
+            --set-secrets OPENAI_API_KEY=projects/1018010958294/secrets/openai-api-key/versions/latest
+
+      - name: Get Service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "Production URL: $SERVICE_URL"
+          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ github.sha }}
+          release_name: Production Deploy ${{ github.sha }}
+          body: |
+            Production deployment successful!
+            
+            Service URL: ${{ env.SERVICE_URL }}
+            Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false

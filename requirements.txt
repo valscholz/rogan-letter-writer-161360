@@ -1,0 +1,8 @@
+openai-agents==0.2.9
+openai>=1.102.0,<2
+python-dotenv>=1.0.1
+asyncio
+fastapi>=0.100.0
+uvicorn>=0.23.0
+requests>=2.31.0
+# WebSearchTool is built into openai-agents

@@ -1,0 +1,1053 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Style-Safe Letter Writer Orchestrator — Chat UI</title>
+  <script>
+    // Theme persistence
+    (function() {
+      const stored = localStorage.getItem('theme');
+      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      const useDark = stored ? stored === 'dark' : prefersDark;
+      if (useDark) document.documentElement.classList.add('dark');
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef8ff',
+              100: '#d9eeff',
+              200: '#b3dcff',
+              300: '#85c7ff',
+              400: '#57b1ff',
+              500: '#2e98ff',
+              600: '#1c7add',
+              700: '#145db1',
+              800: '#124e8f',
+              900: '#123f6f',
+            }
+          },
+          boxShadow: {
+            subtle: '0 1px 2px rgba(0,0,0,0.05), 0 8px 24px rgba(0,0,0,0.06)',
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Scrollbars */
+    .thin-scrollbar::-webkit-scrollbar { width: 10px; height: 10px; }
+    .thin-scrollbar::-webkit-scrollbar-thumb { background: rgba(100,100,100,0.35); border-radius: 999px; }
+    .thin-scrollbar::-webkit-scrollbar-track { background: transparent; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+
+    /* Simple animation for dots */
+    @keyframes blink {
+      0% { opacity: 0.2 }
+      20% { opacity: 1 }
+      100% { opacity: 0.2 }
+    }
+    .dot {
+      animation: blink 1.4s infinite both;
+    }
+    .dot:nth-child(2) { animation-delay: .2s; }
+    .dot:nth-child(3) { animation-delay: .4s; }
+  </style>
+</head>
+<body class="h-full bg-white text-gray-800 dark:bg-gray-950 dark:text-gray-100">
+  <div id="root" class="h-full"></div>
+
+  <!-- React + Babel -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <script type="text/babel">
+    const { useState, useMemo, useEffect, useRef } = React;
+
+    // Utils
+    const uid = () => Math.random().toString(36).slice(2);
+    const nowIso = () => new Date().toISOString();
+    const fmtTime = (ts) => {
+      try { return new Date(ts).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}); }
+      catch { return ''; }
+    }
+    const fmtDateTime = (ts) => {
+      try { return new Date(ts).toLocaleString(); } catch { return ''; }
+    }
+    const classNames = (...arr) => arr.filter(Boolean).join(' ');
+    const saveLS = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+    const loadLS = (k, fallback) => {
+      try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; }
+      catch { return fallback; }
+    }
+
+    // Example quick-selects
+    const QUICK_EXAMPLES = [
+      "Topic: Sponsorship request for our fitness app; Recipient: Joe; Tone: persuasive; Length: medium; Style inspiration: energetic podcast host",
+      "Make it shorter and more formal. Keep the CTA clear. Save this as 'customer outreach' template.",
+      "Agent must be able to generate letters from minimal input (topic) and enrich with inferred structure (greeting, hook, body, CTA, sign-off).",
+      "Agent should handle style inspiration requests (e.g., 'in the style of Joe Rogan') with clear disclaimers and non-deceptive phrasing.",
+      "Agent must support multi-turn revisions with session memory (tone, length, audience, constraints).",
+      "Agent must support structured outputs (JSON with fields: title, greeting, opening, paragraphs[], closing, sign_off, style_notes, disclaimer)."
+    ];
+
+    // Initial controls
+    const defaultControls = () => ({
+      tone: 50, // 0 formal, 100 casual
+      length: 'medium', // 'short'|'medium'|'long'|'custom'
+      wordCount: 250,
+      audience: '',
+      styleInspiration: '',
+      styleIntensity: 50,
+      schemaView: false,
+    });
+
+    const defaultSession = () => ({
+      id: uid(),
+      title: 'New Letter',
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      messages: [],
+      controls: defaultControls(),
+      history: [], // draft snapshots
+    });
+
+    // Toasts
+    const Toast = ({ toast, onClose, onRetry }) => {
+      return (
+        <div role="alert" className="pointer-events-auto w-full max-w-sm rounded-lg bg-white dark:bg-gray-900 shadow-subtle ring-1 ring-gray-200 dark:ring-gray-800 p-4">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5">
+              <svg xmlns="http://www.w3.org/2000/svg" className={classNames("h-6 w-6", toast.type === 'error' ? "text-red-500" : "text-amber-500")} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                {toast.type === 'error' ? (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 9v3m0 4h.01M10.29 3.86l-7.4 12.81A2 2 0 004.6 20h14.8a2 2 0 001.71-3.33L13.71 3.86a2 2 0 00-3.42 0z" />
+                ) : (
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M13 16h-1v-4h-1m1-4h.01M12 2a10 10 0 100 20 10 10 0 000-20z" />
+                )}
+              </svg>
+            </div>
+            <div className="flex-1">
+              <p className="font-medium">{toast.title}</p>
+              {toast.message && <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">{toast.message}</p>}
+              {toast.suggestion && <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">{toast.suggestion}</p>}
+              <div className="mt-3 flex gap-2">
+                {toast.canRetry && <button onClick={onRetry} className="px-2.5 py-1.5 text-sm rounded-md bg-brand-600 text-white hover:bg-brand-700">Retry</button>}
+                {toast.copy && <button onClick={() => navigator.clipboard.writeText(toast.copy)} className="px-2.5 py-1.5 text-sm rounded-md bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700">Copy request</button>}
+                <button onClick={onClose} className="ml-auto px-2.5 py-1.5 text-sm rounded-md bg-transparent hover:bg-gray-100 dark:hover:bg-gray-800">Dismiss</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    // Health hook
+    function useHealth() {
+      const [status, setStatus] = useState({ ok: false, last: null, latency: null });
+      useEffect(() => {
+        let canceled = false;
+        const check = async () => {
+          const start = performance.now();
+          try {
+            const res = await fetch('/health', { method: 'GET' });
+            const latency = Math.round(performance.now() - start);
+            if (!canceled) setStatus({ ok: res.ok, last: nowIso(), latency });
+          } catch (e) {
+            if (!canceled) setStatus({ ok: false, last: nowIso(), latency: null });
+          }
+        };
+        check();
+        const id = setInterval(check, 30000);
+        return () => { canceled = true; clearInterval(id); };
+      }, []);
+      return status;
+    }
+
+    // Structured JSON parser (simple heuristic)
+    function buildStructuredFromText(text, controls) {
+      if (!text) {
+        return {
+          title: "",
+          greeting: "",
+          opening: "",
+          paragraphs: [],
+          closing: "",
+          sign_off: "",
+          style_notes: controls?.styleInspiration ? `Inspiration: ${controls.styleInspiration} (intensity ${controls.styleIntensity}%)` : "",
+          disclaimer: "This letter is AI-generated. Style inspirations are interpreted to avoid deceptive attribution."
+        };
+      }
+      const lines = text.split(/\r?\n/).filter(Boolean);
+      const first = lines[0] || "";
+      const greeting = lines.find(l => /^dear\b/i.test(l.trim())) || "";
+      let opening = "";
+      const paragraphs = [];
+      let closing = "";
+      let signoff = "";
+      // Naive segmentation
+      let buffer = [];
+      for (let i = 0; i < lines.length; i++) {
+        const l = lines[i].trim();
+        if (!l) continue;
+        if (/^(sincerely|best regards|regards|thank you|thanks)[,]?\s*$/i.test(l)) {
+          closing = l;
+          signoff = lines[i+1] || "";
+          break;
+        } else {
+          buffer.push(l);
+        }
+      }
+      if (buffer.length) {
+        if (greeting && buffer[0] === greeting) buffer.shift();
+        opening = buffer[0] || "";
+        paragraphs.push(...buffer.slice(1));
+      }
+      return {
+        title: first.replace(/^#+\s*/, ''),
+        greeting: greeting,
+        opening: opening,
+        paragraphs: paragraphs,
+        closing: closing,
+        sign_off: signoff,
+        style_notes: controls?.styleInspiration ? `Inspiration: ${controls.styleInspiration} (intensity ${controls.styleIntensity}%)` : "",
+        disclaimer: "This letter is AI-generated. Style inspirations are interpreted to avoid deceptive attribution."
+      };
+    }
+
+    // Export helpers
+    function download(filename, text) {
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    }
+
+    // Components
+
+    const Header = ({ health, theme, setTheme, onToggleLeft, onToggleRight }) => {
+      return (
+        <header className="border-b border-gray-200/70 dark:border-gray-800 sticky top-0 bg-white/80 dark:bg-gray-950/80 backdrop-blur z-40">
+          <div className="max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-6 py-3 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <button aria-label="Toggle sidebar" className="md:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800" onClick={onToggleLeft}>
+                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M4 6h16M4 12h16M4 18h16"/></svg>
+              </button>
+              <div className="flex items-center gap-2">
+                <div className="h-8 w-8 rounded-lg bg-brand-600 text-white grid place-items-center font-bold">S</div>
+                <div>
+                  <div className="font-semibold leading-tight">Style-Safe Letter Writer Orchestrator</div>
+                  <div className="text-xs text-gray-500 dark:text-gray-400 leading-tight">AI-powered assistant</div>
+                </div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="hidden sm:flex items-center gap-2 text-sm">
+                <span className={classNames("inline-flex items-center gap-1 px-2 py-1 rounded-full border", health.ok ? "text-emerald-700 border-emerald-200 bg-emerald-50 dark:text-emerald-300 dark:border-emerald-900/60 dark:bg-emerald-900/20" : "text-red-700 border-red-200 bg-red-50 dark:text-red-300 dark:border-red-900/60 dark:bg-red-900/20")}>
+                  <span className={classNames("h-1.5 w-1.5 rounded-full", health.ok ? "bg-emerald-500" : "bg-red-500")}></span>
+                  {health.ok ? "Online" : "Offline"}
+                </span>
+                <span className="text-gray-500 dark:text-gray-400">{health.latency ? `${health.latency}ms` : ''}</span>
+              </div>
+              <button aria-label="Toggle controls panel" className="md:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800" onClick={onToggleRight}>
+                <svg className="w-6 h-6" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M10 6h10M4 6h2M4 12h10M18 12h2M7 18h13M4 18h1"/></svg>
+              </button>
+              <div className="hidden sm:block">
+                <button
+                  aria-label="Toggle dark mode"
+                  className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800"
+                  onClick={() => {
+                    const next = theme === 'dark' ? 'light' : 'dark';
+                    setTheme(next);
+                    if (next === 'dark') document.documentElement.classList.add('dark');
+                    else document.documentElement.classList.remove('dark');
+                    localStorage.setItem('theme', next);
+                  }}
+                >
+                  {theme === 'dark' ? (
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M21.64 13a1 1 0 00-1.05-.14 8 8 0 01-10.45-10.45 1 1 0 00-.14-1.05A10 10 0 1021.64 13z"/></svg>
+                  ) : (
+                    <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M6.76 4.84l-1.8-1.79-1.41 1.41 1.79 1.8 1.42-1.42zM1 13h3v-2H1v2zm10 10h2v-3h-2v3zM4.95 19.07l1.41 1.41 1.8-1.79-1.42-1.42-1.79 1.8zM20 11v2h3v-2h-3zm-1.54-7.95l-1.41-1.41-1.8 1.79 1.42 1.42 1.79-1.8zM13 1h-2v3h2V1zm6.05 18.07l-1.79-1.8-1.42 1.42 1.8 1.79 1.41-1.41zM12 6a6 6 0 100 12A6 6 0 0012 6z"/></svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+          <div className="border-t border-gray-100 dark:border-gray-800 bg-amber-50/80 dark:bg-amber-950/40">
+            <div className="max-w-[1600px] mx-auto px-3 sm:px-4 lg:px-6 py-2 text-xs sm:text-sm text-amber-800 dark:text-amber-200 flex items-start gap-2">
+              <svg className="w-4 h-4 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="currentColor"><path d="M11 7h2v6h-2V7zm0 8h2v2h-2v-2z"/><path d="M12 2C6.49 2 2 6.48 2 12a10 10 0 1010-10zm0 18a8 8 0 110-16 8 8 0 010 16z"/></svg>
+              <p>
+                Style safety: When a user requests a specific person's style, responses will use non-deceptive phrasing and inspiration, not impersonation. Always disclose that the letter is AI-assisted. Review sensitive content for tone before sending.
+              </p>
+            </div>
+          </div>
+        </header>
+      );
+    };
+
+    const Sidebar = ({
+      sessions, activeId, onNewSession, onSelectSession, onRenameSession, onDeleteSession,
+      templates, onSaveTemplate, onApplyTemplate, onDeleteTemplate
+    }) => {
+      const [templateName, setTemplateName] = useState('');
+      const [search, setSearch] = useState('');
+      const filteredSessions = useMemo(() => {
+        const q = search.trim().toLowerCase();
+        return q ? sessions.filter(s => (s.title || '').toLowerCase().includes(q)) : sessions;
+      }, [sessions, search]);
+
+      return (
+        <aside className="h-full flex flex-col">
+          <div className="p-3 sm:p-4 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex items-center gap-2">
+              <button onClick={onNewSession} className="flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-brand-600 hover:bg-brand-700 text-white">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 4v16m8-8H4"/></svg>
+                New session
+              </button>
+            </div>
+            <div className="mt-3">
+              <label className="sr-only" htmlFor="session-search">Search sessions</label>
+              <input id="session-search" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search sessions…" className="w-full px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 focus:outline-none focus:ring-2 focus:ring-brand-500"/>
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto thin-scrollbar">
+            <div className="p-3 sm:p-4">
+              <h3 className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">Sessions</h3>
+              <ul className="space-y-1">
+                {filteredSessions.map(s => (
+                  <li key={s.id}>
+                    <button
+                      onClick={() => onSelectSession(s.id)}
+                      className={classNames("w-full text-left px-3 py-2 rounded-md border flex items-center justify-between",
+                        s.id === activeId ? "bg-brand-50 dark:bg-brand-900/20 border-brand-200 dark:border-brand-900 text-brand-800 dark:text-brand-200" : "hover:bg-gray-50 dark:hover:bg-gray-900 border-gray-200 dark:border-gray-800")}
+                    >
+                      <span className="truncate">{s.title || 'Untitled'}</span>
+                      <div className="flex items-center gap-1 ml-2">
+                        <button
+                          aria-label="Rename session"
+                          onClick={(e)=>{ e.stopPropagation(); const t = prompt('Rename session:', s.title || 'Untitled'); if (t!=null) onRenameSession(s.id, t); }}
+                          className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
+                        >
+                          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M15.232 5.232l3.536 3.536M4 20h4l10.607-10.607a2.5 2.5 0 10-3.536-3.536L4 16v4z"/></svg>
+                        </button>
+                        <button
+                          aria-label="Delete session"
+                          onClick={(e)=>{ e.stopPropagation(); if (confirm('Delete this session?')) onDeleteSession(s.id); }}
+                          className="p-1 rounded hover:bg-red-50 dark:hover:bg-red-950"
+                        >
+                          <svg className="w-4 h-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7h6m-7 0V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>
+                        </button>
+                      </div>
+                    </button>
+                  </li>
+                ))}
+                {filteredSessions.length === 0 && (
+                  <li className="text-sm text-gray-500 dark:text-gray-400 px-1 py-2">No sessions yet.</li>
+                )}
+              </ul>
+
+              <h3 className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mt-6 mb-2">Templates</h3>
+              <div className="flex gap-2">
+                <input
+                  aria-label="Template name"
+                  value={templateName}
+                  onChange={(e)=>setTemplateName(e.target.value)}
+                  placeholder="Template name"
+                  className="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
+                />
+                <button
+                  onClick={()=>{ if(templateName.trim()) { onSaveTemplate(templateName.trim()); setTemplateName(''); } }}
+                  className="px-3 py-2 text-sm rounded-lg bg-gray-100 hover:bg-gray-200 dark:bg-gray-800 dark:hover:bg-gray-700"
+                >
+                  Save
+                </button>
+              </div>
+              <ul className="mt-3 space-y-1">
+                {templates.map(t => (
+                  <li key={t.id} className="flex items-center justify-between gap-2">
+                    <button onClick={()=>onApplyTemplate(t.id)} className="flex-1 text-left px-3 py-2 rounded-md border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900">
+                      <div className="font-medium">{t.name}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400 truncate">{t.preview}</div>
+                    </button>
+                    <button onClick={()=>{ if(confirm('Delete template?')) onDeleteTemplate(t.id) }} aria-label="Delete template" className="p-2 rounded hover:bg-red-50 dark:hover:bg-red-950">
+                      <svg className="w-4 h-4 text-red-500" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6M9 7h6m-7 0V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg>
+                    </button>
+                  </li>
+                ))}
+                {templates.length === 0 && <li className="text-sm text-gray-500 dark:text-gray-400 px-1 py-2">No templates saved.</li>}
+              </ul>
+
+              <h3 className="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400 mt-6 mb-2">Preferences</h3>
+              <ul className="space-y-2 text-sm">
+                <li className="flex items-center justify-between">
+                  <span>Auto-save history</span>
+                  <span className="px-2 py-0.5 rounded-full text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-900/20 dark:text-emerald-300 dark:border-emerald-900/60">On</span>
+                </li>
+                <li className="text-gray-500 dark:text-gray-400">Sessions and templates are stored locally on this device.</li>
+              </ul>
+            </div>
+          </div>
+        </aside>
+      );
+    };
+
+    const MessageBubble = ({ msg }) => {
+      const isUser = msg.role === 'user';
+      return (
+        <div className={classNames("flex gap-3", isUser ? "justify-end" : "justify-start")}>
+          {!isUser && (
+            <div className="shrink-0 h-8 w-8 rounded-full bg-brand-600 text-white grid place-items-center">A</div>
+          )}
+          <div className={classNames(
+            "max-w-[85%] sm:max-w-[75%] rounded-2xl px-4 py-3 shadow-subtle border",
+            isUser ? "bg-brand-600 text-white border-brand-600" : "bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800"
+          )}>
+            <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
+            <div className={classNames("mt-2 text-xs flex items-center gap-2", isUser ? "text-brand-100/90" : "text-gray-500 dark:text-gray-400")}>
+              <span>{fmtTime(msg.timestamp)}</span>
+              {msg.status === 'streaming' && (
+                <span className="inline-flex items-center gap-1">
+                  <span>Streaming</span>
+                  <span className="dot">•</span><span className="dot">•</span><span className="dot">•</span>
+                </span>
+              )}
+              {msg.status === 'error' && <span className="text-red-500">Error</span>}
+            </div>
+          </div>
+          {isUser && (
+            <div className="shrink-0 h-8 w-8 rounded-full bg-gray-200 dark:bg-gray-800 grid place-items-center">U</div>
+          )}
+        </div>
+      );
+    };
+
+    const Composer = ({ value, setValue, onSend, disabled, onStop, isStreaming }) => {
+      const textareaRef = useRef(null);
+      useEffect(() => {
+        if (textareaRef.current) {
+          textareaRef.current.style.height = 'auto';
+          textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 200) + 'px';
+        }
+      }, [value]);
+      return (
+        <div className="border-t border-gray-200 dark:border-gray-800 p-3 sm:p-4 bg-white/70 dark:bg-gray-950/70 backdrop-blur">
+          <div className="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+            <div className="p-2 bg-gray-50 dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800">
+              <div className="flex gap-2 overflow-x-auto no-scrollbar">
+                {QUICK_EXAMPLES.map((ex, i) => (
+                  <button key={i} onClick={()=>setValue(ex)} className="shrink-0 px-3 py-1.5 text-xs rounded-full bg-white dark:bg-gray-950 border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900">
+                    {ex.length > 64 ? ex.slice(0, 61) + '…' : ex}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="p-3">
+              <label htmlFor="composer" className="sr-only">Message</label>
+              <textarea
+                id="composer"
+                ref={textareaRef}
+                value={value}
+                onChange={e=>setValue(e.target.value)}
+                onKeyDown={(e)=> {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (!isStreaming) onSend();
+                  }
+                }}
+                placeholder="Describe your letter or ask for revisions. Shift+Enter for newline."
+                className="w-full bg-transparent outline-none resize-none text-sm"
+                rows={1}
+                aria-label="Chat input"
+              />
+            </div>
+            <div className="px-3 pb-3 flex items-center justify-between">
+              <div className="text-xs text-gray-500 dark:text-gray-400">Enter to send • Shift+Enter for newline</div>
+              <div className="flex items-center gap-2">
+                {isStreaming ? (
+                  <button onClick={onStop} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 text-red-700 hover:bg-red-100 border border-red-200 dark:bg-red-900/20 dark:text-red-300 dark:border-red-900/50">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M6 6h12v12H6z"/></svg>
+                    Stop
+                  </button>
+                ) : (
+                  <button disabled={disabled} onClick={onSend} className="inline-flex items-center gap-2 px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-700 disabled:opacity-50">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M5 12l14-8-4 8 4 8-14-8z"/></svg>
+                    Send
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const PreviewCard = ({ content, streaming }) => {
+      return (
+        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden shadow-subtle">
+          <div className="px-4 py-2.5 bg-gray-50 dark:bg-gray-900 flex items-center justify-between">
+            <div className="text-sm font-medium">Draft preview</div>
+            <div className="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1">
+              <span className={classNames("h-1.5 w-1.5 rounded-full", streaming ? "bg-emerald-500" : "bg-gray-400")}></span>
+              {streaming ? <>Drafter streaming<span className="dot">•</span><span className="dot">•</span><span className="dot">•</span></> : "Idle"}
+            </div>
+          </div>
+          <div className="p-4">
+            {content ? (
+              <pre className="whitespace-pre-wrap text-sm leading-relaxed">{content}</pre>
+            ) : (
+              <div className="text-sm text-gray-500 dark:text-gray-400">Your drafted letter will appear here as it streams in.</div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const ControlsPanel = ({
+      controls, setControls, latestText, onExport, schema, setSchemaOpen, schemaOpen, onGenerate
+    }) => {
+      const [customLen, setCustomLen] = useState(controls.length === 'custom');
+      useEffect(()=>{ setCustomLen(controls.length === 'custom'); }, [controls.length]);
+
+      return (
+        <div className="h-full flex flex-col">
+          <div className="p-4 border-b border-gray-100 dark:border-gray-800">
+            <h2 className="font-semibold">Controls</h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400">Adjust tone, length, and style preferences.</p>
+          </div>
+          <div className="flex-1 overflow-y-auto thin-scrollbar p-4 space-y-6">
+            <section>
+              <label className="text-sm font-medium">Tone (formal ↔ casual)</label>
+              <div className="flex items-center gap-3 mt-2">
+                <span className="text-xs text-gray-500">Formal</span>
+                <input type="range" min="0" max="100" value={controls.tone} onChange={(e)=>setControls(prev=>({...prev, tone: +e.target.value}))} className="w-full"/>
+                <span className="text-xs text-gray-500">Casual</span>
+              </div>
+              <div className="text-xs text-gray-500 mt-1">Current: {controls.tone <= 20 ? 'Very formal' : controls.tone <= 45 ? 'Formal' : controls.tone <= 60 ? 'Neutral' : controls.tone <= 80 ? 'Conversational' : 'Very casual'}</div>
+            </section>
+
+            <section>
+              <label className="text-sm font-medium">Length</label>
+              <div className="mt-2 grid grid-cols-4 gap-2">
+                {['short','medium','long','custom'].map(opt => (
+                  <button key={opt} onClick={()=>setControls(prev=>({...prev, length: opt}))} className={classNames("px-2.5 py-1.5 rounded-lg border text-sm",
+                    controls.length === opt ? "bg-brand-50 dark:bg-brand-900/20 border-brand-200 dark:border-brand-900 text-brand-800 dark:text-brand-200" : "border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900")}>
+                    {opt[0].toUpperCase() + opt.slice(1)}
+                  </button>
+                ))}
+              </div>
+              {controls.length === 'custom' && (
+                <div className="mt-3 flex items-center gap-2">
+                  <label className="text-sm text-gray-600 dark:text-gray-300">Word count</label>
+                  <input type="number" min="50" step="10" value={controls.wordCount} onChange={(e)=>setControls(prev=>({...prev, wordCount: +e.target.value }))} className="w-28 px-2 py-1.5 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"/>
+                </div>
+              )}
+            </section>
+
+            <section className="grid grid-cols-1 gap-3">
+              <div>
+                <label className="text-sm font-medium">Audience</label>
+                <input value={controls.audience} onChange={(e)=>setControls(prev=>({...prev, audience: e.target.value}))} placeholder="e.g., Potential sponsors, HR manager" className="mt-2 w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"/>
+              </div>
+              <div>
+                <label className="text-sm font-medium">Style inspiration</label>
+                <input value={controls.styleInspiration} onChange={(e)=>setControls(prev=>({...prev, styleInspiration: e.target.value}))} placeholder="e.g., energetic podcast host" className="mt-2 w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"/>
+                <div className="mt-2 flex items-center gap-3">
+                  <span className="text-xs text-gray-500">Subtle</span>
+                  <input type="range" min="0" max="100" value={controls.styleIntensity} onChange={(e)=>setControls(prev=>({...prev, styleIntensity: +e.target.value}))} className="w-full"/>
+                  <span className="text-xs text-gray-500">Strong</span>
+                </div>
+              </div>
+            </section>
+
+            <section className="border-t border-gray-200 dark:border-gray-800 pt-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium">Export</h3>
+                <div className="text-xs text-gray-500">Use latest draft</div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                <button onClick={()=>onExport('md')} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 text-sm">Download .md</button>
+                <button onClick={()=>onExport('txt')} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 text-sm">Download .txt</button>
+                <button onClick={()=>navigator.clipboard.writeText(latestText || '')} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 text-sm col-span-2">Copy draft</button>
+              </div>
+            </section>
+
+            <section className="border-t border-gray-200 dark:border-gray-800 pt-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-medium">Schema view (JSON)</h3>
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={schemaOpen} onChange={()=>setSchemaOpen(!schemaOpen)} className="peer sr-only"/>
+                  <span className="w-10 h-6 bg-gray-300 peer-checked:bg-brand-600 rounded-full relative transition-colors">
+                    <span className="absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-all peer-checked:left-4"></span>
+                  </span>
+                </label>
+              </div>
+              {schemaOpen && (
+                <div className="mt-3">
+                  <div className="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-3 max-h-64 overflow-auto thin-scrollbar">
+                    <pre className="text-xs whitespace-pre-wrap">{JSON.stringify(schema, null, 2)}</pre>
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button onClick={()=>navigator.clipboard.writeText(JSON.stringify(schema, null, 2))} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 text-sm">Copy JSON</button>
+                    <button onClick={()=>download('letter-schema.json', JSON.stringify(schema, null, 2))} className="px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900 text-sm">Download JSON</button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="border-t border-gray-200 dark:border-gray-800 pt-4">
+              <h3 className="text-sm font-medium mb-2">Actions</h3>
+              <button onClick={onGenerate} className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-700">
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M12 6v6l4 2"/></svg>
+                Draft new letter
+              </button>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">
+                Uses POST /generate with your current controls and audience to kickstart a draft.
+              </p>
+            </section>
+          </div>
+        </div>
+      );
+    };
+
+    const RevisionHistory = ({ history, onRestore }) => {
+      return (
+        <div className="rounded-2xl border border-gray-200 dark:border-gray-800 overflow-hidden">
+          <div className="px-4 py-2 bg-gray-50 dark:bg-gray-900 text-sm font-medium">Revision history</div>
+          <div className="divide-y divide-gray-200 dark:divide-gray-800 max-h-64 overflow-auto thin-scrollbar">
+            {history.length === 0 && <div className="p-3 text-sm text-gray-500 dark:text-gray-400">No revisions yet.</div>}
+            {history.map(snap => (
+              <div key={snap.id} className="p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm font-medium">{fmtDateTime(snap.createdAt)}</div>
+                  <button onClick={()=>onRestore(snap)} className="text-sm px-2 py-1 rounded border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900">Restore</button>
+                </div>
+                <div className="mt-1 text-xs text-gray-500 dark:text-gray-400 truncate">{(snap.content || '').slice(0, 120)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    // Main App
+    const App = () => {
+      const [theme, setTheme] = useState(document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+      const health = useHealth();
+
+      const [sessions, setSessions] = useState(() => loadLS('sessions', [defaultSession()]));
+      const [activeId, setActiveId] = useState(() => loadLS('activeSessionId', sessions[0]?.id));
+      const active = useMemo(() => sessions.find(s => s.id === activeId) || sessions[0], [sessions, activeId]);
+
+      const [templates, setTemplates] = useState(() => loadLS('templates', []));
+      const [input, setInput] = useState('');
+      const [isStreaming, setIsStreaming] = useState(false);
+      const [abortCtrl, setAbortCtrl] = useState(null);
+      const [toasts, setToasts] = useState([]);
+
+      const [leftOpen, setLeftOpen] = useState(false);
+      const [rightOpen, setRightOpen] = useState(false);
+
+      useEffect(() => saveLS('sessions', sessions), [sessions]);
+      useEffect(() => saveLS('activeSessionId', activeId), [activeId]);
+      useEffect(() => saveLS('templates', templates), [templates]);
+
+      const addToast = (t) => {
+        const id = uid();
+        setToasts(prev => [...prev, { id, ...t }]);
+        setTimeout(()=>setToasts(prev=>prev.filter(x=>x.id !== id)), 6000);
+      };
+
+      const updateActive = (patch) => {
+        setSessions(prev => prev.map(s => s.id === active.id ? ({ ...s, ...patch, updatedAt: nowIso() }) : s));
+      };
+      const pushMessage = (msg) => {
+        updateActive({ messages: [...active.messages, msg] });
+      };
+      const updateLastAssistant = (patch) => {
+        const msgs = [...active.messages];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].role === 'assistant') {
+            msgs[i] = { ...msgs[i], ...patch };
+            break;
+          }
+        }
+        updateActive({ messages: msgs });
+      };
+
+      const latestAssistantText = useMemo(() => {
+        const last = [...(active?.messages || [])].reverse().find(m => m.role === 'assistant');
+        return last?.content || '';
+      }, [active]);
+
+      const schema = useMemo(() => buildStructuredFromText(latestAssistantText, active?.controls), [latestAssistantText, active?.controls]);
+
+      const handleSend = async (customUserText) => {
+        const userText = (customUserText ?? input).trim();
+        if (!userText) return;
+        setInput('');
+        const userMsg = { id: uid(), role: 'user', content: userText, timestamp: nowIso(), status: 'sent' };
+        pushMessage(userMsg);
+
+        const assistantMsg = { id: uid(), role: 'assistant', content: '', timestamp: nowIso(), status: 'streaming' };
+        pushMessage(assistantMsg);
+
+        setIsStreaming(true);
+        const controller = new AbortController();
+        setAbortCtrl(controller);
+
+        try {
+          const body = {
+            messages: active.messages.concat([userMsg]).map(({ role, content }) => ({ role, content })),
+            controls: active.controls,
+            stream: true
+          };
+          const res = await fetch('/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+            signal: controller.signal
+          });
+          if (!res.ok || !res.body) {
+            throw new Error(`Chat failed: ${res.status}`);
+          }
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            // Handle simple SSE or raw chunks
+            const parts = buffer.split('\n');
+            for (let i = 0; i < parts.length - 1; i++) {
+              const line = parts[i].trim();
+              if (!line) continue;
+              let token = line;
+              if (line.startsWith('data:')) token = line.slice(5).trim();
+              // Assuming token is plain text chunk
+              updateLastAssistant({ content: (active.messages.findLast?.(m => m.role==='assistant')?.content || '') + token });
+              // Above might read stale state; better to re-read active: map append
+              setSessions(prev => prev.map(s => {
+                if (s.id !== active.id) return s;
+                const msgs = [...s.messages];
+                for (let j = msgs.length - 1; j >= 0; j--) {
+                  if (msgs[j].role === 'assistant') {
+                    msgs[j] = { ...msgs[j], content: (msgs[j].content || '') + token };
+                    break;
+                  }
+                }
+                return { ...s, messages: msgs };
+              }));
+            }
+            buffer = parts[parts.length - 1];
+          }
+          // Finalize
+          setSessions(prev => prev.map(s => {
+            if (s.id !== active.id) return s;
+            const msgs = [...s.messages];
+            for (let j = msgs.length - 1; j >= 0; j--) {
+              if (msgs[j].role === 'assistant') {
+                msgs[j] = { ...msgs[j], status: 'sent', timestamp: nowIso() };
+                break;
+              }
+            }
+            // Snapshot
+            const lastAssistant = [...msgs].reverse().find(m=>m.role==='assistant');
+            const snap = { id: uid(), createdAt: nowIso(), content: lastAssistant?.content || '', controls: s.controls };
+            return { ...s, messages: msgs, history: [snap, ...s.history].slice(0, 50) };
+          }));
+        } catch (e) {
+          console.error(e);
+          setSessions(prev => prev.map(s => {
+            if (s.id !== active.id) return s;
+            const msgs = [...s.messages];
+            for (let j = msgs.length - 1; j >= 0; j--) {
+              if (msgs[j].role === 'assistant') {
+                msgs[j] = { ...msgs[j], status: 'error' };
+                break;
+              }
+            }
+            return { ...s, messages: msgs };
+          }));
+          addToast({
+            type: 'error',
+            title: 'Streaming failed',
+            message: e.message || 'Unable to stream response.',
+            suggestion: 'Check server availability, network, or CORS settings. You can retry or copy the request payload.',
+            canRetry: true,
+            copy: JSON.stringify({ messages: active.messages.concat([{ role: 'user', content: userText }]), controls: active.controls, stream: true }, null, 2)
+          });
+        } finally {
+          setIsStreaming(false);
+          setAbortCtrl(null);
+        }
+      };
+
+      const stopStreaming = () => {
+        if (abortCtrl) abortCtrl.abort();
+        setIsStreaming(false);
+        setAbortCtrl(null);
+        // Mark as stopped
+        updateLastAssistant({ status: 'sent', timestamp: nowIso() });
+      };
+
+      const handleExport = (fmt) => {
+        const content = latestAssistantText || '';
+        if (fmt === 'md') {
+          download('letter.md', content);
+        } else {
+          download('letter.txt', content.replace(/\r?\n/g, '\n'));
+        }
+      };
+
+      const handleGenerate = async () => {
+        // Kickstart draft using /generate with controls
+        setIsStreaming(true);
+        const controller = new AbortController();
+        setAbortCtrl(controller);
+        const sysMsg = { id: uid(), role: 'user', content: 'Generate a new letter based on current controls and audience. Include greeting, hook, body, CTA, sign-off.', timestamp: nowIso(), status: 'sent' };
+        pushMessage(sysMsg);
+        const assistantMsg = { id: uid(), role: 'assistant', content: '', timestamp: nowIso(), status: 'streaming' };
+        pushMessage(assistantMsg);
+        try {
+          const res = await fetch('/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ controls: active.controls, audience: active.controls.audience || '', stream: true }),
+            signal: controller.signal
+          });
+          if (!res.ok || !res.body) throw new Error(`Generate failed: ${res.status}`);
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder('utf-8');
+          let buffer = '';
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const parts = buffer.split('\n');
+            for (let i = 0; i < parts.length - 1; i++) {
+              const line = parts[i].trim();
+              if (!line) continue;
+              const token = line.startsWith('data:') ? line.slice(5).trim() : line;
+              setSessions(prev => prev.map(s => {
+                if (s.id !== active.id) return s;
+                const msgs = [...s.messages];
+                for (let j = msgs.length - 1; j >= 0; j--) {
+                  if (msgs[j].role === 'assistant') {
+                    msgs[j] = { ...msgs[j], content: (msgs[j].content || '') + token };
+                    break;
+                  }
+                }
+                return { ...s, messages: msgs };
+              }));
+            }
+            buffer = parts[parts.length - 1];
+          }
+          setSessions(prev => prev.map(s => {
+            if (s.id !== active.id) return s;
+            const msgs = [...s.messages];
+            for (let j = msgs.length - 1; j >= 0; j--) {
+              if (msgs[j].role === 'assistant') {
+                msgs[j] = { ...msgs[j], status: 'sent', timestamp: nowIso() };
+                break;
+              }
+            }
+            const lastAssistant = [...msgs].reverse().find(m=>m.role==='assistant');
+            const snap = { id: uid(), createdAt: nowIso(), content: lastAssistant?.content || '', controls: s.controls };
+            return { ...s, messages: msgs, history: [snap, ...s.history].slice(0, 50) };
+          }));
+        } catch (e) {
+          console.error(e);
+          updateLastAssistant({ status: 'error' });
+          addToast({
+            type: 'error',
+            title: 'Generation failed',
+            message: e.message || 'Unable to generate.',
+            suggestion: 'Ensure /generate endpoint is reachable and supports streaming.',
+            canRetry: false
+          });
+        } finally {
+          setIsStreaming(false);
+          setAbortCtrl(null);
+        }
+      };
+
+      const onNewSession = () => {
+        const s = defaultSession();
+        setSessions(prev => [s, ...prev]);
+        setActiveId(s.id);
+      };
+      const onSelectSession = (id) => setActiveId(id);
+      const onRenameSession = (id, title) => setSessions(prev => prev.map(s => s.id === id ? { ...s, title, updatedAt: nowIso() } : s));
+      const onDeleteSession = (id) => {
+        let next = sessions.filter(s => s.id !== id);
+        if (next.length === 0) next = [defaultSession()];
+        setSessions(next);
+        if (activeId === id) setActiveId(next[0].id);
+      };
+
+      const onSaveTemplate = (name) => {
+        const tpl = {
+          id: uid(),
+          name,
+          controls: active.controls,
+          preview: (latestAssistantText || active.messages.find(m=>m.role==='user')?.content || '').slice(0, 80)
+        };
+        setTemplates(prev => [tpl, ...prev]);
+        addToast({ type: 'info', title: 'Template saved', message: `Saved as "${name}".` });
+      };
+      const onApplyTemplate = (id) => {
+        const tpl = templates.find(t => t.id === id);
+        if (!tpl) return;
+        updateActive({ controls: tpl.controls });
+        addToast({ type: 'info', title: 'Template applied', message: `"${tpl.name}" controls loaded.` });
+      };
+      const onDeleteTemplate = (id) => setTemplates(prev => prev.filter(t => t.id !== id));
+
+      const setControls = (fnOrPatch) => {
+        const next = typeof fnOrPatch === 'function' ? fnOrPatch(active.controls) : { ...active.controls, ...fnOrPatch };
+        updateActive({ controls: next });
+      };
+
+      const onRestoreSnap = (snap) => {
+        // Replace latest assistant message with snapshot
+        setSessions(prev => prev.map(s => {
+          if (s.id !== active.id) return s;
+          const msgs = [...s.messages];
+          const idx = [...msgs].map(m=>m.role).lastIndexOf('assistant');
+          if (idx >= 0) msgs[idx] = { ...msgs[idx], content: snap.content, status: 'sent', timestamp: nowIso() };
+          else msgs.push({ id: uid(), role: 'assistant', content: snap.content, timestamp: nowIso(), status: 'sent' });
+          return { ...s, messages: msgs };
+        }));
+        addToast({ type: 'info', title: 'Revision restored', message: 'Draft replaced with selected revision.' });
+      };
+
+      // Example: intercept quick-select that mentions saving as template
+      useEffect(() => {
+        // When assistant produces a response, auto-title session from first user prompt
+        if (!active) return;
+        const firstUser = active.messages.find(m => m.role === 'user');
+        if (firstUser && (!active.title || active.title === 'New Letter')) {
+          const title = firstUser.content.split(/[;.\n]/)[0].slice(0, 40) || 'Session';
+          updateActive({ title });
+        }
+        // eslint-disable-next-line
+      }, [active?.messages?.length]);
+
+      const [schemaOpen, setSchemaOpen] = useState(false);
+
+      // Layout
+      return (
+        <div className="h-full flex flex-col">
+          <Header
+            health={health}
+            theme={theme} setTheme={setTheme}
+            onToggleLeft={()=>setLeftOpen(!leftOpen)}
+            onToggleRight={()=>setRightOpen(!rightOpen)}
+          />
+
+          <div className="flex-1 max-w-[1600px] mx-auto w-full grid grid-cols-1 md:grid-cols-[280px_1fr_360px] gap-0 md:gap-6 px-0 md:px-4 lg:px-6">
+            {/* Left Sidebar */}
+            <div className={classNames(
+              "md:sticky md:top-[112px] md:self-start md:h-[calc(100vh-112px)] bg-white dark:bg-gray-950 border-b md:border-0 border-gray-200 dark:border-gray-800",
+              leftOpen ? "block" : "hidden md:block"
+            )}>
+              <Sidebar
+                sessions={sessions}
+                activeId={active?.id}
+                onNewSession={onNewSession}
+                onSelectSession={onSelectSession}
+                onRenameSession={onRenameSession}
+                onDeleteSession={onDeleteSession}
+                templates={templates}
+                onSaveTemplate={onSaveTemplate}
+                onApplyTemplate={onApplyTemplate}
+                onDeleteTemplate={onDeleteTemplate}
+              />
+            </div>
+
+            {/* Main Chat + Preview */}
+            <main className="flex flex-col min-h-[calc(100vh-112px)]">
+              <div className="flex-1 overflow-y-auto thin-scrollbar p-3 sm:p-4">
+                <div className="max-w-3xl mx-auto">
+                  {/* Messages */}
+                  <div className="space-y-4">
+                    {(active?.messages || []).map(m => <MessageBubble key={m.id} msg={m} />)}
+                    {active?.messages?.length === 0 && (
+                      <div className="rounded-2xl border border-dashed border-gray-300 dark:border-gray-800 p-6 text-center text-sm text-gray-600 dark:text-gray-400">
+                        Start by describing your letter or pick a quick example below. Adjust tone and length on the right.
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Preview */}
+                  <div className="mt-6">
+                    <PreviewCard content={latestAssistantText} streaming={isStreaming} />
+                  </div>
+
+                  {/* Revision history */}
+                  <div className="mt-6">
+                    <RevisionHistory history={active?.history || []} onRestore={onRestoreSnap} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Composer */}
+              <div className="sticky bottom-0">
+                <Composer
+                  value={input}
+                  setValue={setInput}
+                  onSend={()=>handleSend()}
+                  disabled={!active}
+                  onStop={stopStreaming}
+                  isStreaming={isStreaming}
+                />
+              </div>
+            </main>
+
+            {/* Right Controls */}
+            <div className={classNames(
+              "md:sticky md:top-[112px] md:self-start md:h-[calc(100vh-112px)] bg-white dark:bg-gray-950 border-t md:border-0 border-gray-200 dark:border-gray-800",
+              rightOpen ? "block" : "hidden md:block"
+            )}>
+              <ControlsPanel
+                controls={active?.controls || defaultControls()}
+                setControls={setControls}
+                latestText={latestAssistantText}
+                onExport={handleExport}
+                schema={schema}
+                schemaOpen={schemaOpen}
+                setSchemaOpen={setSchemaOpen}
+                onGenerate={handleGenerate}
+              />
+            </div>
+          </div>
+
+          {/* Toasts */}
+          <div className="fixed right-3 sm:right-6 bottom-3 sm:bottom-6 flex flex-col gap-3 z-50">
+            {toasts.map(t => (
+              <Toast
+                key={t.id}
+                toast={t}
+                onClose={()=>setToasts(prev => prev.filter(x=>x.id!==t.id))}
+                onRetry={()=>{ setToasts(prev => prev.filter(x=>x.id!==t.id)); handleSend(); }}
+              />
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>

@@ -1,0 +1,35 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  labels:
+    agent: Rogan Letter Writer
+    environment: production
+    managed-by: caminu
+  name: Rogan Letter Writer-production
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: '100'
+        autoscaling.knative.dev/minScale: '1'
+        run.googleapis.com/cpu-throttling: 'false'
+    spec:
+      containers:
+      - env:
+        - name: ENVIRONMENT
+          value: production
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              key: latest
+              name: openai-api-key
+        image: us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${PROJECT_ID}/Rogan
+          Letter Writer:${IMAGE_TAG}
+        ports:
+        - containerPort: 8080
+          name: http1
+        resources:
+          limits:
+            cpu: '2'
+            memory: 1Gi
+      serviceAccountName: Rogan Letter Writer-sa
