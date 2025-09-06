@@ -5,4 +5,5 @@ asyncio
 fastapi>=0.100.0
 uvicorn>=0.23.0
 requests>=2.31.0
+psutil>=5.9.0
 # WebSearchTool is built into openai-agents

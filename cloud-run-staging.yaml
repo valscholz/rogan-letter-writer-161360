@@ -30,6 +30,6 @@ spec:
           name: http1
         resources:
           limits:
-            cpu: '1'
-            memory: 512Mi
+            cpu: '2'
+            memory: 1Gi
       serviceAccountName: Rogan Letter Writer-sa

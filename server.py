@@ -10,13 +10,30 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 from agent import main_agent
-from agents import Runner
+from agents import Runner, Session
 import os
+import threading
+import psutil
+import gc
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Global session for simple chat continuity
+# For production, you'd want per-user session management
+try:
+    chat_session = Session()
+except Exception as e:
+    logger.warning(f"Could not create session: {e}")
+    chat_session = None
+
+# Thread pool for controlled concurrency
+max_workers = min(4, os.cpu_count() or 1)
+thread_pool = ThreadPoolExecutor(max_workers=max_workers)
+logger.info(f"Initialized thread pool with {max_workers} workers")
 
 app = FastAPI(
     title="Style-Safe Letter Writer Orchestrator",
@@ -76,12 +93,42 @@ async def api_info():
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy", "service": "style-safe-letter-writer-orchestrator"}
+    try:
+        memory_info = psutil.virtual_memory()
+        thread_count = threading.active_count()
+        
+        # Determine health status
+        status = "healthy"
+        if memory_info.percent > 85:
+            status = "warning_high_memory"
+        if thread_count > 50:
+            status = "warning_high_threads" 
+        if memory_info.percent > 95 or thread_count > 100:
+            status = "unhealthy"
+            
+        return {
+            "status": status,
+            "service": "style-safe-letter-writer-orchestrator",
+            "resources": {
+                "memory_percent": memory_info.percent,
+                "memory_available_mb": memory_info.available // 1024 // 1024,
+                "thread_count": thread_count,
+                "cpu_count": os.cpu_count()
+            }
+        }
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {"status": "error", "service": "style-safe-letter-writer-orchestrator", "error": str(e)}
 
 @app.post("/generate", response_model=AgentResponse)
 async def generate(request: AgentRequest):
     try:
         logger.info(f"Processing request: {request.prompt[:100]}...")
+        
+        # Force garbage collection to free memory
+        gc.collect()
+        
+        # Run the agent
         result = await Runner().run(main_agent, request.prompt)
         return AgentResponse(
             response=result.final_output,
@@ -89,6 +136,13 @@ async def generate(request: AgentRequest):
         )
     except Exception as e:
         logger.error(f"Error generating response: {str(e)}")
+        # Log system resource info for debugging  
+        try:
+            memory_info = psutil.virtual_memory()
+            thread_count = threading.active_count()
+            logger.error(f"System state - Memory: {memory_info.percent}% used, Threads: {thread_count}")
+        except:
+            pass
         raise HTTPException(status_code=500, detail=f"Error generating response: {str(e)}")
 
 @app.post("/chat", response_model=AgentResponse)
@@ -96,21 +150,56 @@ async def chat(request: AgentRequest):
     """Chat endpoint for conversational agents"""
     try:
         logger.info(f"Processing chat request: {request.prompt[:100]}...")
-        result = await Runner().run(main_agent, request.prompt)
+        
+        # Force garbage collection to free memory
+        gc.collect()
+        
+        # Try with session first (for conversational agents)
+        try:
+            if chat_session:
+                result = await Runner().run(main_agent, request.prompt, session=chat_session)
+            else:
+                result = await Runner().run(main_agent, request.prompt)
+        except Exception as session_error:
+            logger.warning(f"Session-based run failed: {session_error}, trying without session")
+            # Fallback to no session (for simple agents)
+            result = await Runner().run(main_agent, request.prompt)
+            
         return AgentResponse(
             response=result.final_output,
             status="success"
         )
     except Exception as e:
         logger.error(f"Error in chat: {str(e)}")
+        # Log system resource info for debugging
+        try:
+            memory_info = psutil.virtual_memory()
+            thread_count = threading.active_count()
+            logger.error(f"System state - Memory: {memory_info.percent}% used, Threads: {thread_count}")
+        except:
+            pass
         raise HTTPException(status_code=500, detail=f"Error in chat: {str(e)}")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    logger.info(f"Starting server on port {port}")
+    workers = min(2, os.cpu_count() or 1)  # Limit workers to reduce thread usage
+    logger.info(f"Starting server on port {port} with {workers} workers")
+    
+    # Log startup system info
+    try:
+        memory_info = psutil.virtual_memory() 
+        logger.info(f"System startup - Memory: {memory_info.total // 1024 // 1024}MB total, {memory_info.available // 1024 // 1024}MB available")
+        logger.info(f"CPUs available: {os.cpu_count()}")
+    except Exception as e:
+        logger.warning(f"Could not get system info: {e}")
+    
     uvicorn.run(
         "server:app",
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        workers=1,  # Use single worker to reduce memory/thread usage
+        log_level="info",
+        access_log=False,  # Reduce logging overhead
+        limit_concurrency=16,  # Limit concurrent connections
+        limit_max_requests=1000,  # Restart worker after 1000 requests to free memory
     )
