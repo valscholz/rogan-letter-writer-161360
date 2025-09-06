@@ -13,14 +13,14 @@ try:
     # CPU time limit: 5 minutes per request
     resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
     
-    # Memory limit: 512MB
-    resource.setrlimit(resource.RLIMIT_AS, (512*1024*1024, 512*1024*1024))
+    # Memory limit: 1GB (matching Cloud Run allocation)
+    resource.setrlimit(resource.RLIMIT_AS, (1024*1024*1024, 1024*1024*1024))
     
     # File size limit: 10MB
     resource.setrlimit(resource.RLIMIT_FSIZE, (10*1024*1024, 10*1024*1024))
     
-    # Number of processes: 1 (no forking)
-    resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
+    # Number of processes: Allow threads but prevent forking
+    resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
     
 except Exception:
     pass  # Some limits might not be available

@@ -23,6 +23,12 @@ spec:
             secretKeyRef:
               key: latest
               name: openai-api-key
+        - name: OPENAI_MAX_CONNECTIONS
+          value: "8"
+        - name: OPENAI_MAX_KEEPALIVE_CONNECTIONS
+          value: "4"
+        - name: PYTHONOPTIMIZE
+          value: "1"
         image: us-central1-docker.pkg.dev/${{ env.PROJECT_ID }}/caminu-agents/${PROJECT_ID}/Rogan
           Letter Writer:${IMAGE_TAG}
         ports:
